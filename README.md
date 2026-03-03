@@ -2,7 +2,7 @@
 
 > A node.js CLI tool for converting packed LDraw models (.mpd) to GLTF's binary (.glb) format.
 
-[![node-lts](https://img.shields.io[mpd2glb])]
+[![Node.js v24.11](https://img.shields.io/badge/node-24.11-brightgreen)](https://nodejs.org/en/download)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **mpd2glb** reads packed .mpd LDraw models (see below for details) and generates a new GLTF binary model (.glb) with most similar features to the original LDraw model. The final .glb model will have the real-world dimensions of the original model, i.e. scaled to centimeters instead of LDUs.
