@@ -92,17 +92,21 @@ globalThis.FileReader = FileReader;
   };
 })();
 
+/**
+ * Prints usage instructions to the console.
+ */
 function usage() {
   console.error("\nUsage: node main.mjs [options] <input.mpd>");
   console.error(
     "Converts an LDraw MPD file to an optimized GLTF .glb file. The output filename is derived from the input if not provided.",
   );
   console.error("Options:");
+  console.error("  -h, --help              Show this help message and exit");
   console.error(
     "  -c, --compress <mode>   draco|meshopt|none (default: meshopt)",
   );
   console.error(
-    "  -l, --ldraw <url>       Library URL (http(s):// or file:// for a local directory)",
+    "  -l, --ldraw <path>      Library path: http(s)://, file://, or a local directory path",
   );
   console.error(
     "  -o, --output <file>     Output filename (default: <input>.glb)",
@@ -315,10 +319,20 @@ async function applyTransform(document, compressionType) {
 }
 
 // ==================== CLI argument parsing ====================
+/**
+ * Parses command-line arguments.
+ * @param {string[]} argv - The command-line arguments (default: process.argv).
+ * @returns {Object} The parsed arguments.
+ */
 function parseCLI(argv = process.argv) {
   const { values, positionals } = parseArgs({
     args: argv.slice(2),
     options: {
+      help: {
+        type: "boolean",
+        short: "h",
+        default: false,
+      },
       compress: {
         type: "string",
         short: "c",
@@ -339,6 +353,11 @@ function parseCLI(argv = process.argv) {
     strict: true,
   });
 
+  if (values.help) {
+    usage();
+    process.exit(0);
+  }
+
   // Validate compression mode
   if (!COMPRESSION_MODES.includes(values.compress)) {
     throw new Error(
@@ -347,12 +366,9 @@ function parseCLI(argv = process.argv) {
     );
   }
 
-  // Validate ldraw URL (if provided)
-  if (values.ldraw && !isValidLDrawUrl(values.ldraw)) {
-    throw new Error(
-      `Invalid --ldraw value: "${values.ldraw}". ` +
-        `Must be http(s):// or file:// URL`,
-    );
+  // Normalize ldraw path/URL (if provided)
+  if (values.ldraw) {
+    values.ldraw = normalizeLDrawPath(values.ldraw);
   }
 
   // Require exactly one positional argument (input path/URL)
@@ -374,24 +390,51 @@ function parseCLI(argv = process.argv) {
   };
 }
 
-function isValidLDrawUrl(url) {
+/**
+ * Normalizes a --ldraw value to a URL string with a trailing slash.
+ * Accepts http(s):// and file:// URLs, or a local filesystem path.
+ */
+function normalizeLDrawPath(ldraw) {
+  let normalized;
   try {
-    const parsed = new URL(url);
-    return ["http:", "https:", "file:"].includes(parsed.protocol);
+    const parsed = new URL(ldraw);
+    if (!["http:", "https:", "file:"].includes(parsed.protocol)) {
+      throw new Error(`Unsupported protocol: ${parsed.protocol}`);
+    }
+    normalized = ldraw;
   } catch {
-    return false;
+    // Not a URL — treat as a local filesystem path
+    normalized = pathToFileURL(resolve(ldraw)).href;
   }
+  if (!normalized.endsWith("/")) normalized += "/";
+  return normalized;
+}
+
+/**
+ * Reads text from a local path, file:// URL, or http(s):// URL.
+ */
+async function readTextFile(input) {
+  if (input.startsWith("file://")) {
+    return fs.readFile(new URL(input).pathname, "utf8");
+  }
+  if (input.startsWith("http://") || input.startsWith("https://")) {
+    const res = await fetch(input);
+    if (!res.ok)
+      throw new Error(`HTTP ${res.status} ${res.statusText}: ${input}`);
+    return res.text();
+  }
+  return fs.readFile(input, "utf8");
 }
 
 function generateOutputName(input) {
-  // Handle URLs: extract filename from path
-  if (input.startsWith("http://") || input.startsWith("https://")) {
+  // Handle URLs: extract filename from the URL path
+  if (/^(https?|file):\/\//.test(input)) {
     const url = new URL(input);
     const filename = basename(url.pathname) || "model";
     return replaceExtension(filename, ".glb");
   }
 
-  // Handle file paths
+  // Handle local file paths
   const filename = basename(input);
   return replaceExtension(filename, ".glb");
 }
@@ -412,7 +455,7 @@ function resolveOutputPath(output) {
   return output;
 }
 
-//////////////// Main CLI entry point
+//////////////// Main CLI entry point ////////////////
 async function main() {
   let config;
   // Usage
@@ -439,7 +482,7 @@ async function main() {
   console.log(`Processing ${input}...`);
 
   // -- Load and prepare the LDraw model (ONLY for packed .mpd files) --
-  const mpdContents = await fs.readFile(input, "utf8");
+  const mpdContents = await readTextFile(input);
   let ldrawGroup = await ldrawMPDtoGroup(mpdContents, ldraw);
   ldrawGroup = optimizeLDrawGroup(ldrawGroup);
 
