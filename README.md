@@ -54,9 +54,9 @@ bun mpd2glb.mjs --help
 This is a very simple tool, try it with a sample packed model (included):
 
 ```bash
-node main.mjs -c draco -o f1-car.glb -l models/f1-car-packed.mpd f1-car.glb
+node main.mjs -c draco -o f1-car.glb models/f1-car-packed.mpd
 # or (faster execution!)
-bun mpd2glb.mjs -c draco -o f1-car.glb -l models/f1-car-packed.mpd f1-car.glb
+bun mpd2glb.mjs -c draco -o f1-car.glb models/f1-car-packed.mpd
 ```
 To see the result, open the `f1-car.glb` model on an editor, like e.g. [Three.js Editor](https://threejs.org/editor/)
 
