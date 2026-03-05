@@ -1,17 +1,18 @@
 {
   "type": "module",
   "name": "mpd2glb",
-  "version": "0.1",
+  "version": "0.2",
   "engines": {
     "node": ">=24.11.0"
   },
   "scripts": {
-    "build": "npx esbuild main.mjs --bundle --platform=node --format=esm --external:meshoptimizer --outfile=mpd2glb.mjs"
+    "build": "npx esbuild main.mjs --bundle --platform=node --format=esm --external:meshoptimizer --external:draco3dgltf --outfile=mpd2glb.mjs"
   },
   "dependencies": {
     "@gltf-transform/core": "^4.3.0",
     "@gltf-transform/extensions": "^4.3.0",
     "@gltf-transform/functions": "^4.3.0",
+    "draco3dgltf": "^1.5.7",
     "meshoptimizer": "^1.0.1",
     "three": "^0.183.2",
     "vblob": "^1.1.0"

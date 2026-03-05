@@ -13,9 +13,8 @@ The final `.glb` model will have the real-world dimensions of the original model
 
 - **Multi-platform** - Built on node.js with cross-platform dependencies
 - **Automated conditional lines clean-up** - Avoids visual artifacts on the output model
-- **Rescaling models to real-world size** - Converts LDU dimensions to real-world metrics: `.glb` models are real-size 
-ones!
-- **Meshopt optimized** - For quick load times and rendering on browser or elsewhere!
+- **Rescaling models to real-world size** - Converts LDU dimensions to real-world metrics: `.glb` models are real-size ones!
+- **Compression support** - Supports `--draco`, `--meshopt` and `--none` compression options
 - **No LDraw parts library dependency** - Requires input .mpd models to be packed first, take a look at: 
     - [Packing LDraw Files](https://forums.ldraw.org/thread-28554.html)
     - [packLDrawModel.mjs packager](https://github.com/mrdoob/three.js/blob/dev/utils/packLDrawModel.mjs)
@@ -42,11 +41,11 @@ npm run build # outputs: mpd2glb.mjs executable
 ### Verify it works
 
 ```bash
-npm main.mjs
+npm main.mjs --help
 # or
-bun main.mjs
+bun main.mjs --help
 # or (bun only!)
-bun mpd2glb.mjs
+bun mpd2glb.mjs --help
 ```
 
 ## Usage
@@ -54,13 +53,16 @@ bun mpd2glb.mjs
 This is a very simple tool, try it with a sample packed model (included):
 
 ```bash
-node main.js models/f1-car-packed.mpd f1-car.glb
+node main.js --draco  models/f1-car-packed.mpd f1-car.glb
 # or (faster execution!)
-bun mpd2glb.mjs models/f1-car-packed.mpd f1-car.glb
+bun mpd2glb.mjs --draco models/f1-car-packed.mpd f1-car.glb
 ```
 To see the result, open the `f1-car.glb` model on an editor, like e.g. [Three.js Editor](https://threejs.org/editor/)
 
 ![alt text](assets/threejs-editor.png)
+
+**NOTE:** Tis is the original LDraw model for the F1 car: [42000-1.mpd](https://raw.githubusercontent.com/anteloc/ldraw-lib/master/models/42000-1.mpd)
+
 
 ## Notes
 

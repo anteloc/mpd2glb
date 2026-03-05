@@ -9,11 +9,23 @@ import { ALL_EXTENSIONS } from "@gltf-transform/extensions";
 import {
   meshopt,
 } from "@gltf-transform/functions";
+import { draco } from '@gltf-transform/functions';
+import draco3d from 'draco3dgltf';
+
 
 import { Blob, FileReader } from "vblob";
 
 globalThis.Blob = Blob;
 globalThis.FileReader = FileReader;
+
+function usage() {
+  console.error("Usage: node main.mjs [--help] [--meshopt|--draco|--none] input.mpd output.glb");
+    console.error("Example: node main.mjs --meshopt models/f1-car-packed.mpd output/f1-car.glb");
+    console.error("Options:");
+    console.error("[--meshopt|--draco|--none]: optional compression method to apply to the output GLB (default: --meshopt)");
+    console.error("input.mpd: a packed LDraw MPD model (unpacked files with external references are not supported yet)");
+    console.error(`output.glb: the resulting optimized GLB model`);
+}
 
 /**
  * Exports a THREE.Object3D to a .glb binary buffer.
@@ -165,15 +177,62 @@ function optimizeLDrawGroup(ldrawGroup) {
   return optimizedGroup;
 }
 
+/**
+ * 
+ * @param {Document} document 
+ * @param {String} compressionType 
+ * @returns 
+ */
+async function applyTransform(document, compressionType) {
+  if (compressionType === "none") {
+    return;
+  }
+  
+  // See: https://gltf-transform.donmccurdy.com/functions.html
+  let transform = (compressionType === "meshopt")
+  ? meshopt({ encoder: MeshoptEncoder, level: "high", }) 
+  : draco({method: 'edgebreaker'});
+    
+  await document.transform(transform);
+}
+
 //////////////// Main CLI entry point
 async function main() {
-  const [, , inFile, outFile] = process.argv;
+  const [, , arg1, arg2, arg3] = process.argv;
+
+  let compressionType = "meshopt"; // default to meshopt, can be overridden by CLI arg
+  let inFile;
+  let outFile;
+
+  // if a first flag argument is provided, it must be a compression option
+  if (arg1 && arg1.startsWith("--")) {
+    switch (arg1) {
+      case "--help":
+        usage();
+        process.exit(0);
+      case "--meshopt":
+        compressionType = "meshopt";
+        break;
+      case "--draco":
+        compressionType = "draco";
+        break;
+      case "--none":
+        compressionType = "none";
+        break;
+      default:
+        console.error(`Unknown compression type: ${arg1}`);
+        usage();
+        process.exit(1);
+    }
+    inFile = arg2;
+    outFile = arg3;
+  } else {
+    inFile = arg1;
+    outFile = arg2;
+  }
 
   if (!inFile || !outFile) {
-    console.error("Usage: node main.mjs input.mpd output.glb");
-    console.error("Example: node main.mjs models/f1-car-packed.mpd output/f1-car.glb");
-    console.error("- input.mpd: a packed LDraw MPD model (unpacked files with external references are not supported yet)");
-    console.error("- output.glb: the resulting optimized GLB model, meshopt-compressed (Draco not supported yet)");
+    usage();
     process.exit(1);
   }
 
@@ -199,18 +258,12 @@ async function main() {
     .registerExtensions(ALL_EXTENSIONS) // TODO review which extensions are needed, not all of them!
     .registerDependencies({
       "meshopt.encoder": MeshoptEncoder,
+      'draco3d.encoder': await draco3d.createEncoderModule(),
     });
 
   const document = await io.readBinary(glbBuf);
-
-  // See: https://gltf-transform.donmccurdy.com/functions.html
-  await document.transform(
-    meshopt({
-      //TODO this drastically reduces file size but causes some viewers to fail loading the model, e.g. Blender, investigate further, maybe switch to Draco compression instead?
-      encoder: MeshoptEncoder,
-      level: "high",
-    }),
-  );
+  
+  await applyTransform(document, compressionType);
 
   // -- Write the optimized GLB back to disk --
   const optimizedBuf = await io.writeBinary(document); // serialize back to GLB
