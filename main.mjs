@@ -96,40 +96,33 @@ globalThis.FileReader = FileReader;
  * Prints usage instructions to the console.
  */
 function usage() {
-  console.error("\nUsage: node main.mjs [options] <input.mpd>");
-  console.error(
-    "Converts an LDraw MPD file to an optimized GLTF .glb file. The output filename is derived from the input if not provided.",
-  );
-  console.error("Options:");
-  console.error("  -h, --help              Show this help message and exit");
-  console.error(
-    "  -c, --compress <mode>   draco|meshopt|none (default: meshopt)",
-  );
-  console.error(
-    "  -l, --ldraw <path>      Library path: http(s)://, file://, or a local directory path",
-  );
-  console.error(
-    "  -o, --output <file>     Output filename (default: <input>.glb)",
-  );
-  console.error("Examples:");
-  console.error(
-    "  # Convert with meshopt compression and a parts LDraw library URL",
-  );
-  console.error(
-    "  node main.mjs -c meshopt -l https://github.com/anteloc/ldraw-lib/tree/master/ldraw -o output-dir/f1-car.glb models/f1-car.mpd",
-  );
-  console.error(
-    "  # Convert with meshopt compression and a local LDraw library",
-  );
-  console.error(
-    "  node main.mjs -l file://some/path/ldraw -o output-dir/f1-car.glb models/f1-car.mpd",
-  );
-  console.error(
-    "  # Convert with (default) meshopt compression and no LDraw library (only works for fully packed .mpd files)",
-  );
-  console.error(
-    "  node main.mjs -o output-dir/f1-car.glb models/f1-car-packed.mpd",
-  );
+  const helpText = `
+  Usage: node main.mjs [options] <input.mpd>
+  Converts an LDraw MPD file to an optimized GLTF .glb file. The output filename is derived from the input if not provided.
+  
+  Options:
+    -h, --help              Show this help message and exit
+    -c, --compress <mode>   draco|meshopt|none (default: draco)
+    -l, --ldraw <path>      Library path: http(s)://, file://, or a local directory path
+    -o, --output <file>     Output filename (default: <input>.glb)
+    <input.mpd>             Input LDraw MPD file path or URL (required)
+  
+  Examples:
+
+    # fully local: ldraw lib and model
+    node main.mjs -c draco -o 10129-1.glb -l path/to/ldraw path/to/models/10129-1.mpd
+
+    # mixed: ldraw lib (local) and model (remote)
+    node main.mjs -c draco -o 10129-1.glb -l https://raw.githubusercontent.com/anteloc/ldraw-lib/master/models/10129-1.mpd
+
+    # fully remote: ldraw lib and model
+    node main.mjs -c meshopt -o 10129-1.glb -l https://raw.githubusercontent.com/anteloc/ldraw-lib/master/ldraw  https://raw.githubusercontent.com/anteloc/ldraw-lib/master/models/10129-1.mpd
+
+    # packed model: no ldraw lib required
+    node main.mjs -c meshopt -o some-model.glb path/to/models/some-model-packed.mpd
+    `
+  ;
+  console.error(helpText);
 }
 
 /**
@@ -336,7 +329,7 @@ function parseCLI(argv = process.argv) {
       compress: {
         type: "string",
         short: "c",
-        default: "meshopt",
+        default: "draco",
       },
       ldraw: {
         type: "string",
@@ -458,18 +451,9 @@ function resolveOutputPath(output) {
 //////////////// Main CLI entry point ////////////////
 async function main() {
   let config;
-  // Usage
+
   try {
     config = parseCLI();
-    console.log("Parsed config:", config);
-
-    // Example output:
-    // {
-    //   input: 'models/f1-car.mpd',
-    //   output: '/absolute/path/to/f1-car.glb',
-    //   compress: 'draco',
-    //   ldraw: 'https://raw.githubusercontent...',
-    // }
   } catch (error) {
     console.error(`Error: ${error.message}`);
     usage();
@@ -477,9 +461,11 @@ async function main() {
   }
 
   const { input, output, compress, ldraw } = config;
+
   // Elapsed time measurement
   const startTime = Date.now();
-  console.log(`Processing ${input}...`);
+  
+  console.log(`Processing: ${input}...`);
 
   // -- Load and prepare the LDraw model (ONLY for packed .mpd files) --
   const mpdContents = await readTextFile(input);
