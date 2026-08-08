@@ -92,6 +92,219 @@ globalThis.FileReader = FileReader;
   };
 })();
 
+// ---------------------------------------------------------------------------
+// Workaround for a three.js LDrawLoader submodel-resolution bug
+//
+// The LDraw standard says a submodel embedded in the .mpd as a "0 FILE" block
+// always wins over a same-named file in the parts library.  LDrawLoader breaks
+// that rule for sub-folder-qualified names:
+//
+//   * "0 FILE" blocks are cached under their RAW name, backslashes included
+//     ("s\10179 - 33299s01.dat").
+//   * type-1 references are NORMALIZED before the cache lookup: "\" becomes
+//     "/", a leading "s/" becomes "parts/s/" and "48/" becomes "p/48/", giving
+//     "parts/s/10179 - 33299s01.dat".
+//
+// The two keys never match, so the embedded block is ignored and the loader
+// goes looking for a library part that does not exist, aborting the conversion.
+//
+// The fix registers the already-parsed embedded block under every key the
+// reference resolver can produce.  Keys that already exist are left alone, so
+// genuine library subparts (e.g. "s\47996s01.dat") keep resolving normally.
+// ---------------------------------------------------------------------------
+function patchEmbeddedFileResolution(loader) {
+  const parseCache = loader.partsCache.parseCache;
+  const origSetData = parseCache.setData.bind(parseCache);
+
+  parseCache.setData = (fileName, text) => {
+    origSetData(fileName, text);
+
+    // The first "0 FILE" name is not trimmed by the loader, unlike references.
+    const trimmed = fileName.trim();
+    const normalized = trimmed.replace(/\\/g, "/");
+    const aliases = new Set([trimmed, normalized]);
+
+    if (normalized.startsWith("s/")) {
+      aliases.add("parts/" + normalized);
+    } else if (normalized.startsWith("48/")) {
+      aliases.add("p/" + normalized);
+    }
+
+    // Sharing the parsed object is safe: getData() clones by default, and the
+    // non-cloning callers only read metadata from it.
+    const parsed = parseCache._cache[fileName.toLowerCase()];
+
+    for (const alias of aliases) {
+      const key = alias.toLowerCase();
+      if (!(key in parseCache._cache)) {
+        parseCache._cache[key] = parsed;
+      }
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tolerate subobjects that really cannot be resolved.
+//
+// A rejected fetch inside LDrawLoader propagates out of Promise.all and aborts
+// the whole conversion, after printing one stack trace per occurrence.  Resolve
+// with empty LDraw content instead: the part becomes an empty group, the rest
+// of the model still converts, and every distinct missing name is collected so
+// a single summary can be reported afterwards.
+//
+// @returns {Set<string>} the names that could not be resolved, filled in as
+//   parsing progresses.
+// ---------------------------------------------------------------------------
+function patchMissingSubobjectHandling(loader) {
+  const parseCache = loader.partsCache.parseCache;
+  const origFetchData = parseCache.fetchData.bind(parseCache);
+  const missing = new Set();
+
+  parseCache.fetchData = async (fileName) => {
+    try {
+      return await origFetchData(fileName);
+    } catch {
+      missing.add(fileName);
+      return "";
+    }
+  };
+
+  return missing;
+}
+
+// ---------------------------------------------------------------------------
+// Colour remapping (--map-color <from>,<to>)
+//
+// Both sides accept either an LDraw colour code or a colour name as defined by
+// the "0 !COLOUR <name> CODE <code> ..." directives of LDConfig.ldr.  Names are
+// matched case-insensitively and spaces are interchangeable with underscores,
+// so "Dark_pink", "dark pink" and "DARK_PINK" all resolve to code 5.
+//
+// The mapping is applied to the parsed scene rather than to the colour table,
+// so it works both with a preloaded LDConfig.ldr and with packed models that
+// carry their own "0 !COLOUR" definitions: by the time parsing is done, every
+// colour the model uses is present in the loader's material library.
+// ---------------------------------------------------------------------------
+
+/**
+ * Splits a raw "<from>,<to>" CLI value into its two colour tokens.
+ *
+ * @param {string[]} specs - Raw --map-color values, in command-line order.
+ * @returns {Array<{from: string, to: string}>}
+ */
+function parseColorMappingSpecs(specs) {
+  return specs.map((spec) => {
+    const parts = spec.split(",").map((part) => part.trim());
+
+    if (parts.length !== 2 || parts.some((part) => part === "")) {
+      throw new Error(
+        `Invalid --map-color value: "${spec}". Expected <from>,<to>, ` +
+          `e.g. Green,Dark_Pink or 16,26`,
+      );
+    }
+
+    return { from: parts[0], to: parts[1] };
+  });
+}
+
+/**
+ * Resolves a colour code or colour name to its LDraw colour code.
+ *
+ * @param {string} token - Colour code or colour name.
+ * @param {LDrawLoader} loader - Loader holding the populated material library.
+ * @returns {?string} The colour code, or null if the colour is unknown.
+ */
+function resolveColorToken(token, loader) {
+  if (/^\d+$/.test(token)) {
+    return loader.getMaterial(token) ? token : null;
+  }
+
+  const normalize = (name) => name.trim().toLowerCase().replace(/[\s_]+/g, "_");
+  const wanted = normalize(token);
+  const material = loader.materials.find((m) => normalize(m.name) === wanted);
+
+  return material ? material.userData.code : null;
+}
+
+/**
+ * Replaces the materials of every mesh and line whose colour code appears on
+ * the left-hand side of a --map-color option.
+ *
+ * Replacing the material reference (instead of recolouring it in place) keeps
+ * the exported GLB tidy: the remapped geometry shares the single, correctly
+ * named material of the target colour, and chained mappings such as
+ * "--map-color 2,5 --map-color 5,4" stay independent of each other.
+ *
+ * @param {THREE.Object3D} root - The parsed LDraw scene.
+ * @param {Array<{from: string, to: string}>} mappings - Colour mappings.
+ * @param {LDrawLoader} loader - Loader holding the populated material library.
+ */
+function applyColorMappings(root, mappings, loader) {
+  const unknown = [];
+  const byCode = new Map();
+
+  for (const { from, to } of mappings) {
+    const fromCode = resolveColorToken(from, loader);
+    const toCode = resolveColorToken(to, loader);
+
+    if (fromCode === null) unknown.push(from);
+    if (toCode === null) unknown.push(to);
+    if (fromCode !== null && toCode !== null) {
+      byCode.set(fromCode, loader.getMaterial(toCode));
+    }
+  }
+
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown LDraw colour(s): ${unknown.join(", ")}. ` +
+        `Use a colour code or a colour name from LDConfig.ldr` +
+        `${loader.materials.length === 0 ? " (hint: pass -l <ldraw library> so the colour table is loaded)" : ""}`,
+    );
+  }
+
+  // Meshes hold face materials, LineSegments hold the edge variants; both carry
+  // the same userData.code, so the target variant is picked the same way the
+  // loader itself does it in applyMaterialsToMesh().
+  const mapMaterial = (object, material) => {
+    const target = byCode.get(material?.userData?.code);
+    if (!target) return material;
+
+    if (!object.isLineSegments) return target;
+
+    const edgeMaterial = loader.edgeMaterialCache.get(target);
+    if (!edgeMaterial) return material;
+
+    if (!object.isConditionalLine) return edgeMaterial;
+
+    return loader.conditionalEdgeMaterialCache.get(edgeMaterial) ?? material;
+  };
+
+  let remapped = 0;
+
+  root.traverse((object) => {
+    if (!object.material) return;
+
+    if (Array.isArray(object.material)) {
+      object.material = object.material.map((material) => {
+        const mapped = mapMaterial(object, material);
+        if (mapped !== material) remapped++;
+        return mapped;
+      });
+    } else {
+      const mapped = mapMaterial(object, object.material);
+      if (mapped !== object.material) remapped++;
+      object.material = mapped;
+    }
+  });
+
+  if (remapped === 0) {
+    console.warn(
+      `Warning: --map-color matched no geometry, the model does not use ` +
+        `colour(s): ${mappings.map((m) => m.from).join(", ")}`,
+    );
+  }
+}
+
 /**
  * Prints usage instructions to the console.
  */
@@ -105,8 +318,12 @@ function usage() {
     -c, --compress <mode>   draco|meshopt|none (default: draco)
     -l, --ldraw <path>      Library path: http(s)://, file://, or a local directory path
     -o, --output <file>     Output filename (default: <input>.glb)
+        --map-color <a>,<b> Replace LDraw colour <a> by colour <b> in the output.
+                            Each side is a colour code or a colour name from
+                            LDConfig.ldr (case-insensitive, spaces = underscores).
+                            May be given several times.
     <input.mpd>             Input LDraw MPD file path or URL (required)
-  
+
   Examples:
 
     # fully local: ldraw lib and model
@@ -120,6 +337,11 @@ function usage() {
 
     # packed model: no ldraw lib required
     node main.mjs -c meshopt -o some-model.glb path/to/models/some-model-packed.mpd
+
+    # recolour: by name, by code, or mixed, repeatable
+    node main.mjs -l path/to/ldraw --map-color Green,Dark_Pink -c draco -o prop.glb models/55300.dat
+    node main.mjs -l path/to/ldraw --map-color 16,26 -c draco -o prop.glb models/55300.dat
+    node main.mjs -l path/to/ldraw --map-color 16,Dark_Pink --map-color Red,4 -c draco -o prop.glb models/55300.dat
     `
   ;
   console.error(helpText);
@@ -238,10 +460,15 @@ function prepareObject(root) {
  * Reads an LDraw MPD file content and parses it into a THREE.Group using LDrawLoader.
  * @param {String} mpdText
  * @param {String} ldrawLibrary - Optional URL to the LDraw parts library.
+ * @param {Array<{from: string, to: string}>} colorMappings - Optional colour remappings.
  * @returns {Promise<THREE.Group>} - Resolves with a THREE.Group containing the parsed LDraw model.
  */
-async function ldrawMPDtoGroup(mpdText, ldrawLibrary) {
+async function ldrawMPDtoGroup(mpdText, ldrawLibrary, colorMappings = []) {
   const loader = new LDrawLoader();
+
+  // Embedded "0 FILE" submodels must win over the parts library, see above
+  patchEmbeddedFileResolution(loader);
+  const missingSubobjects = patchMissingSubobjectHandling(loader);
 
   // Required in recent three.js if the model uses conditional lines
   loader.setConditionalLineMaterial(LDrawConditionalLineMaterial);
@@ -261,6 +488,20 @@ async function ldrawMPDtoGroup(mpdText, ldrawLibrary) {
     console.error("Error parsing MPD content:", error);
     throw error;
   });
+
+  if (missingSubobjects.size > 0) {
+    console.warn(
+      `Warning: ${missingSubobjects.size} subobject(s) could not be resolved, ` +
+        `the converted model may be incomplete:`,
+    );
+    for (const fileName of [...missingSubobjects].sort()) {
+      console.warn(`  - ${fileName}`);
+    }
+  }
+
+  if (colorMappings.length > 0) {
+    applyColorMappings(ldrawGroup, colorMappings, loader);
+  }
 
   return ldrawGroup;
 }
@@ -341,6 +582,11 @@ function parseCLI(argv = process.argv) {
         short: "o",
         // No default - computed from input
       },
+      "map-color": {
+        type: "string",
+        multiple: true,
+        default: [],
+      },
     },
     allowPositionals: true,
     strict: true,
@@ -380,6 +626,7 @@ function parseCLI(argv = process.argv) {
     output: resolveOutputPath(output),
     compress: values.compress,
     ldraw: values.ldraw || null, // Convert empty string to null
+    colorMappings: parseColorMappingSpecs(values["map-color"]),
   };
 }
 
@@ -460,7 +707,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { input, output, compress, ldraw } = config;
+  const { input, output, compress, ldraw, colorMappings } = config;
 
   // Elapsed time measurement
   const startTime = Date.now();
@@ -469,7 +716,7 @@ async function main() {
 
   // -- Load and prepare the LDraw model (ONLY for packed .mpd files) --
   const mpdContents = await readTextFile(input);
-  let ldrawGroup = await ldrawMPDtoGroup(mpdContents, ldraw);
+  let ldrawGroup = await ldrawMPDtoGroup(mpdContents, ldraw, colorMappings);
   ldrawGroup = optimizeLDrawGroup(ldrawGroup);
 
   // -- Convert to GLB --

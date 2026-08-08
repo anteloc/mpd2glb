@@ -15,6 +15,7 @@ The final `.glb` model will have the real-world dimensions of the original model
 - **Automated conditional lines clean-up** - Avoids visual artifacts on the output model
 - **Rescaling models to real-world size** - Converts LDU dimensions to real-world metrics: `.glb` models are real-size ones!
 - **Compression support** - Supports `draco`, `meshopt` and `none` compression options
+- **Colour remapping** - Replace any LDraw colour by another one at conversion time with `--map-color`
 - **Remotes support** - Supports both local and remote: ldraw parts library and `.mpd` model
 - **Optional LDraw library dependency** - Not required for packed input `.mpd` models, take a look at: 
     - [Packing LDraw Files](https://forums.ldraw.org/thread-28554.html)
@@ -79,6 +80,33 @@ node main.mjs -c meshopt -o 10129-1.glb -l https://raw.githubusercontent.com/ant
 # packed model: no ldraw lib required
 node main.mjs -c meshopt -o some-model.glb path/to/models/some-model-packed.mpd
 ```
+
+## Colour remapping
+
+`--map-color <from>,<to>` replaces one LDraw colour by another in the output `.glb`.
+Each side is either a colour **code** or a colour **name**, as defined by the
+`0 !COLOUR <name> CODE <code> ...` lines of your library's `LDConfig.ldr`.
+Names are case-insensitive and spaces are interchangeable with underscores,
+so `Dark_Pink`, `dark pink` and `DARK_PINK` all mean code `5`.
+
+The option may be repeated; mappings are applied simultaneously, so
+`--map-color 2,4 --map-color 4,14` turns green into red and red into yellow
+without chaining the two.
+
+```bash
+# map by colour name
+node main.mjs -l path/to/ldraw --map-color Green,Dark_Pink -c draco -o prop.glb models/55300.dat
+
+# map by colour code
+node main.mjs -l path/to/ldraw --map-color 16,26 -c draco -o prop.glb models/55300.dat
+
+# mixed: colour code replaced by colour name, or viceversa
+node main.mjs -l path/to/ldraw --map-color 16,Dark_Pink -c draco -o prop.glb models/55300.dat
+```
+
+Unknown colours abort the conversion; a colour the model does not actually use is
+reported as a warning and the conversion continues. Packed models are supported
+too — their own `0 !COLOUR` definitions are used when no `-l` library is given.
 
 ## Notes
 

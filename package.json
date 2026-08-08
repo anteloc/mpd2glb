@@ -6,7 +6,7 @@
     "node": ">=24.11.0"
   },
   "scripts": {
-    "build": "npx esbuild main.mjs --bundle --platform=node --format=esm --external:meshoptimizer --external:draco3dgltf --outfile=mpd2glb.mjs"
+    "build": "npx esbuild main.mjs --bundle --platform=node --format=esm --external:meshoptimizer --external:draco3dgltf --external:sharp --banner:js=\"import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);\" --outfile=mpd2glb.mjs"
   },
   "dependencies": {
     "@gltf-transform/core": "^4.3.0",
