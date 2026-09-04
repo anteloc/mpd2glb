@@ -16,6 +16,7 @@ The final `.glb` model will have the real-world dimensions of the original model
 - **Rescaling models to real-world size** - Converts LDU dimensions to real-world metrics: `.glb` models are real-size ones!
 - **Compression support** - Supports `draco`, `meshopt` and `none` compression options
 - **Colour remapping** - Replace any LDraw colour by another one at conversion time with `--map-color`
+- **Part and submodel descriptions** - Every node gets a `description` custom property, readable in Blender and other editors
 - **Remotes support** - Supports both local and remote: ldraw parts library and `.mpd` model
 - **Optional LDraw library dependency** - Not required for packed input `.mpd` models, take a look at: 
     - [Packing LDraw Files](https://forums.ldraw.org/thread-28554.html)
@@ -107,6 +108,40 @@ node main.mjs -l path/to/ldraw --map-color 16,Dark_Pink -c draco -o prop.glb mod
 Unknown colours abort the conversion; a colour the model does not actually use is
 reported as a warning and the conversion continues. Packed models are supported
 too — their own `0 !COLOUR` definitions are used when no `-l` library is given.
+
+## Part and submodel descriptions
+
+Nodes in the generated `.glb` carry the LDraw metadata as custom properties — `author`,
+`buildingStep`, `category`, `colorCode`, `fileName`, `keywords`, `type` — and mpd2glb
+adds one more: **`description`**, the human-readable name LDraw keeps on the first line
+of every file and of every `0 FILE` block.
+
+```
+0 FILE 10265 - Rear Axle Adjustment.ldr
+0 Rear Axle Adjustment            <-- becomes description = "Rear Axle Adjustment"
+0 Name: 10265 - Rear Axle Adjustment.ldr
+```
+
+Descriptions are resolved in this order:
+
+1. The model's own `0 FILE` block — used for the main model, for every submodel, and for
+   the parts embedded in a packed `.mpd`. No parts library or index needed.
+2. The part descriptions index, a tab-separated `<part file name>` / `<description>`
+   file, for parts pulled from the LDraw library.
+3. The file name itself, when the index is available but has no row for that part.
+
+If no index is available at all, parts simply get no `description` property.
+
+The bundled `part-descriptions-full.tsv` is picked up automatically: mpd2glb looks for it
+next to `main.mjs` / `mpd2glb.mjs` first, then in the current directory. Use
+`--descriptions <file>` to point at a different index:
+
+```bash
+node main.mjs -l path/to/ldraw --descriptions my-descriptions.tsv -c draco -o 10129-1.glb path/to/models/10129-1.mpd
+```
+
+The index is read once per conversion and kept in memory, so a model with thousands of
+repeated parts costs a single lookup per distinct part.
 
 ## Notes
 

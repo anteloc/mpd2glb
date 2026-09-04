@@ -6,16 +6,25 @@ import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { NodeIO } from "@gltf-transform/core";
 import { MeshoptEncoder } from "meshoptimizer"; // WASM, no external binary needed
 import { ALL_EXTENSIONS } from "@gltf-transform/extensions";
-import { meshopt } from "@gltf-transform/functions";
-import { draco } from "@gltf-transform/functions";
+import {
+  dedup,
+  draco,
+  meshopt,
+  prune,
+  weld,
+} from "@gltf-transform/functions";
 import draco3d from "draco3dgltf";
 
 import { Blob, FileReader } from "vblob";
 import { parseArgs } from "node:util";
-import { basename, extname, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { basename, dirname, extname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const COMPRESSION_MODES = ["draco", "meshopt", "none"];
+
+// Default name of the "<part file name>\t<description>" index looked up when
+// --descriptions is not given, see findPartDescriptionsFile().
+const PART_DESCRIPTIONS_FILE = "part-descriptions-full.tsv";
 
 globalThis.Blob = Blob;
 globalThis.FileReader = FileReader;
@@ -112,6 +121,31 @@ globalThis.FileReader = FileReader;
 // reference resolver can produce.  Keys that already exist are left alone, so
 // genuine library subparts (e.g. "s\47996s01.dat") keep resolving normally.
 // ---------------------------------------------------------------------------
+/**
+ * Every lower-cased key a "0 FILE" name can be referenced by from a type-1 line.
+ *
+ * The loader trims references, turns backslashes into slashes and rewrites the
+ * standardized subfolders ("s/" lives under "parts/", "48/" under "p/"), while
+ * the "0 FILE" name itself is stored verbatim.
+ *
+ * @param {string} fileName - A raw "0 FILE" name.
+ * @returns {string[]} The lower-cased keys, most specific last.
+ */
+function fileNameAliases(fileName) {
+  // The first "0 FILE" name is not trimmed by the loader, unlike references.
+  const trimmed = fileName.trim();
+  const normalized = trimmed.replace(/\\/g, "/");
+  const aliases = new Set([trimmed, normalized]);
+
+  if (normalized.startsWith("s/")) {
+    aliases.add("parts/" + normalized);
+  } else if (normalized.startsWith("48/")) {
+    aliases.add("p/" + normalized);
+  }
+
+  return [...aliases].map((alias) => alias.toLowerCase());
+}
+
 function patchEmbeddedFileResolution(loader) {
   const parseCache = loader.partsCache.parseCache;
   const origSetData = parseCache.setData.bind(parseCache);
@@ -119,23 +153,11 @@ function patchEmbeddedFileResolution(loader) {
   parseCache.setData = (fileName, text) => {
     origSetData(fileName, text);
 
-    // The first "0 FILE" name is not trimmed by the loader, unlike references.
-    const trimmed = fileName.trim();
-    const normalized = trimmed.replace(/\\/g, "/");
-    const aliases = new Set([trimmed, normalized]);
-
-    if (normalized.startsWith("s/")) {
-      aliases.add("parts/" + normalized);
-    } else if (normalized.startsWith("48/")) {
-      aliases.add("p/" + normalized);
-    }
-
     // Sharing the parsed object is safe: getData() clones by default, and the
     // non-cloning callers only read metadata from it.
     const parsed = parseCache._cache[fileName.toLowerCase()];
 
-    for (const alias of aliases) {
-      const key = alias.toLowerCase();
+    for (const key of fileNameAliases(fileName)) {
       if (!(key in parseCache._cache)) {
         parseCache._cache[key] = parsed;
       }
@@ -170,6 +192,224 @@ function patchMissingSubobjectHandling(loader) {
   };
 
   return missing;
+}
+
+// ---------------------------------------------------------------------------
+// Descriptions ("description" custom property)
+//
+// LDraw stores a human-readable description as the first content line of every
+// file and of every "0 FILE" block:
+//
+//   0 FILE 10265 - Rear Axle Adjustment.ldr
+//   0 Rear Axle Adjustment            <- the description
+//   0 Name: 10265 - Rear Axle Adjustment.ldr
+//
+// LDrawLoader keeps !LDRAW_ORG, !CATEGORY, !KEYWORDS and Author: but drops the
+// description, so it never reaches the userData that the GLTF exporter writes
+// out as node "extras" (the custom properties Blender shows on import).
+//
+// Descriptions are resolved per node, in this order:
+//
+//   1. the "0 FILE" block of the model itself, for the main model as well as
+//      for every embedded submodel or packed part,
+//   2. the part descriptions index, when one is available,
+//   3. the file name, when the index is available but has no matching row.
+//
+// With no index and no "0 FILE" description, no property is written at all.
+// ---------------------------------------------------------------------------
+
+// Meta directives that may legally appear before the description line, or that
+// would be mistaken for one. Anything else on the first "0" line is the
+// description.
+const NON_DESCRIPTION_META = /^(?:!|\/\/|Name:|Author:|BFC\b|STEP\b|FILE\b)/;
+
+/**
+ * Reads the LDraw description out of a file or "0 FILE" block body.
+ *
+ * @param {string} text - Raw LDraw text.
+ * @returns {?string} The description, or null if the text has none.
+ */
+function extractLDrawDescription(text) {
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (line === "") continue;
+
+    // A whole .mpd starts with the "0 FILE" line of its main model; the
+    // description is the line below it.
+    if (/^0\s+FILE\s/i.test(line)) continue;
+
+    if (!/^0(\s|$)/.test(line)) return null;
+
+    const description = line.slice(1).trim();
+
+    return description === "" || NON_DESCRIPTION_META.test(description)
+      ? null
+      : description;
+  }
+
+  return null;
+}
+
+/**
+ * Collects the description of every "0 FILE" block the loader parses.
+ *
+ * setData() is the single funnel all embedded blocks pass through, and it is
+ * deliberately the only hook: descriptions read out of parts library .dat files
+ * must not shadow the ones from the index.
+ *
+ * @param {LDrawLoader} loader - Loader to patch.
+ * @returns {Map<string, string>} Descriptions by file name alias, filled in as
+ *   parsing progresses.
+ */
+function captureFileDescriptions(loader) {
+  const parseCache = loader.partsCache.parseCache;
+  const origSetData = parseCache.setData.bind(parseCache);
+  const descriptions = new Map();
+
+  parseCache.setData = (fileName, text) => {
+    origSetData(fileName, text);
+
+    const description = extractLDrawDescription(text);
+    if (description === null) return;
+
+    for (const key of fileNameAliases(fileName)) {
+      if (!descriptions.has(key)) {
+        descriptions.set(key, description);
+      }
+    }
+  };
+
+  return descriptions;
+}
+
+/**
+ * Folds a part file name onto the spelling used by the descriptions index.
+ *
+ * The index lists the standardized subfolders the way LDraw references spell
+ * them ("s/4079s01.dat", "48/1-4cyli.dat"), while the loader reports the
+ * location they are loaded from ("parts/s/4079s01.dat", "p/48/1-4cyli.dat").
+ *
+ * @param {string} fileName - A part file name from either side.
+ * @returns {string} The lookup key.
+ */
+function canonicalPartKey(fileName) {
+  return fileName
+    .trim()
+    .toLowerCase()
+    .replace(/\\/g, "/")
+    .replace(/^(?:parts|p)\//, "");
+}
+
+/**
+ * Locates the part descriptions index when --descriptions is not given: next to
+ * this script (or to the bundle built from it), then in the current directory.
+ *
+ * @returns {Promise<?string>} Path to the index, or null if there is none.
+ */
+async function findPartDescriptionsFile() {
+  const candidates = [
+    resolve(dirname(fileURLToPath(import.meta.url)), PART_DESCRIPTIONS_FILE),
+    resolve(process.cwd(), PART_DESCRIPTIONS_FILE),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // Not there, try the next one
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Reads the "<file name>\t<description>" index into a lookup table.
+ *
+ * Models routinely use the same part thousands of times, so the whole index is
+ * read once per run and kept in a Map for O(1) lookups.
+ *
+ * @param {?string} path - Index path, or null to auto-discover one.
+ * @param {boolean} required - Whether a missing file is an error.
+ * @returns {Promise<?Map<string, string>>} Descriptions by canonical part key,
+ *   or null when no index is available.
+ */
+async function loadPartDescriptions(path, required) {
+  const file = path ?? (await findPartDescriptionsFile());
+
+  if (file === null) return null;
+
+  let text;
+  try {
+    text = await fs.readFile(file, "utf8");
+  } catch (error) {
+    if (required) {
+      throw new Error(`Cannot read descriptions index "${file}": ${error.message}`);
+    }
+    return null;
+  }
+
+  const descriptions = new Map();
+
+  for (const line of text.split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab <= 0) continue;
+
+    const description = line.slice(tab + 1).trim();
+    if (description !== "") {
+      descriptions.set(canonicalPartKey(line.slice(0, tab)), description);
+    }
+  }
+
+  return descriptions;
+}
+
+/**
+ * Sets userData.description on every node the loader gave a file name to, which
+ * the GLTF exporter then writes out as a node "extras" custom property.
+ *
+ * @param {THREE.Object3D} root - The parsed LDraw scene.
+ * @param {Map<string, string>} fileDescriptions - Descriptions collected from
+ *   the "0 FILE" blocks of the model.
+ * @param {?Map<string, string>} partDescriptions - The descriptions index, or
+ *   null if none is available.
+ * @param {?string} rootDescription - Description of the main model, whose block
+ *   is the .mpd itself and so never reaches captureFileDescriptions().
+ */
+function applyDescriptions(
+  root,
+  fileDescriptions,
+  partDescriptions,
+  rootDescription,
+) {
+  // The same part shows up once per instance; resolve each name only once.
+  const resolved = new Map();
+
+  const describe = (fileName) => {
+    if (resolved.has(fileName)) return resolved.get(fileName);
+
+    let description = fileDescriptions.get(fileName.trim().toLowerCase()) ?? null;
+
+    if (description === null && partDescriptions !== null) {
+      description = partDescriptions.get(canonicalPartKey(fileName)) ?? fileName;
+    }
+
+    resolved.set(fileName, description);
+    return description;
+  };
+
+  root.traverse((object) => {
+    const fileName = object.userData?.fileName;
+
+    // The main model's own node carries an empty file name, see LDrawLoader.parse()
+    const description =
+      object === root ? rootDescription : fileName ? describe(fileName) : null;
+
+    if (description !== null && description !== undefined) {
+      object.userData.description = description;
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +562,12 @@ function usage() {
                             Each side is a colour code or a colour name from
                             LDConfig.ldr (case-insensitive, spaces = underscores).
                             May be given several times.
+        --descriptions <f>  Tab-separated "<part file>\\t<description>" index used
+                            to fill the "description" custom property of parts.
+                            Default: ${PART_DESCRIPTIONS_FILE} next to this
+                            script, then in the current directory. Submodels and
+                            packed parts always use their own "0 FILE"
+                            description, no index needed.
     <input.mpd>             Input LDraw MPD file path or URL (required)
 
   Examples:
@@ -461,14 +707,21 @@ function prepareObject(root) {
  * @param {String} mpdText
  * @param {String} ldrawLibrary - Optional URL to the LDraw parts library.
  * @param {Array<{from: string, to: string}>} colorMappings - Optional colour remappings.
+ * @param {?Map<string, string>} partDescriptions - Optional descriptions index.
  * @returns {Promise<THREE.Group>} - Resolves with a THREE.Group containing the parsed LDraw model.
  */
-async function ldrawMPDtoGroup(mpdText, ldrawLibrary, colorMappings = []) {
+async function ldrawMPDtoGroup(
+  mpdText,
+  ldrawLibrary,
+  colorMappings = [],
+  partDescriptions = null,
+) {
   const loader = new LDrawLoader();
 
   // Embedded "0 FILE" submodels must win over the parts library, see above
   patchEmbeddedFileResolution(loader);
   const missingSubobjects = patchMissingSubobjectHandling(loader);
+  const fileDescriptions = captureFileDescriptions(loader);
 
   // Required in recent three.js if the model uses conditional lines
   loader.setConditionalLineMaterial(LDrawConditionalLineMaterial);
@@ -498,6 +751,13 @@ async function ldrawMPDtoGroup(mpdText, ldrawLibrary, colorMappings = []) {
       console.warn(`  - ${fileName}`);
     }
   }
+
+  applyDescriptions(
+    ldrawGroup,
+    fileDescriptions,
+    partDescriptions,
+    extractLDrawDescription(mpdText),
+  );
 
   if (colorMappings.length > 0) {
     applyColorMappings(ldrawGroup, colorMappings, loader);
@@ -533,9 +793,28 @@ function optimizeLDrawGroup(ldrawGroup) {
 }
 
 /**
+ * Applies the geometry compression pipeline.
+ *
+ * Draco compresses only indexed, mode=TRIANGLES primitives, so an LDraw model's
+ * edge lines (~24% of its vertices) are left untouched by draco() and stay raw
+ * f32. weld() supplies the indices Draco requires.
+ *
+ * Deliberately does NOT quantize(). Draco already quantizes internally (14-bit
+ * positions here), so KHR_mesh_quantization buys almost nothing on top - and
+ * combining the two breaks glTFast/Unity: the Draco bitstream records
+ * normalized=false in its own attribute metadata, and the Draco package's
+ * DecodeMesh API has no normalized parameter, so the accessor's
+ * `normalized: true` is lost. int16 positions then arrive unscaled (up to
+ * 32767 units) instead of divided by 32767. Bounds still look right, because
+ * those are read from the accessor min/max, so the model silently imports with
+ * every triangle collapsed. Only the uncompressed LINES survive.
+ *
+ * Deliberately omits palette(), join() and flatten(): on a textureless,
+ * many-small-parts LDraw model palette() adds a texture plus a TEXCOORD_0 to
+ * every vertex, and join() merges geometry into f32 mega-meshes.
  *
  * @param {Document} document
- * @param {String} compressionType
+ * @param {String} compressionType - draco|meshopt|none
  * @returns
  */
 async function applyTransform(document, compressionType) {
@@ -544,12 +823,29 @@ async function applyTransform(document, compressionType) {
   }
 
   // See: https://gltf-transform.donmccurdy.com/functions.html
-  let transform =
-    compressionType === "meshopt"
-      ? meshopt({ encoder: MeshoptEncoder, level: "high" })
-      : draco({ method: "edgebreaker" });
+  // Ordering follows gltf-transform's own `optimize` command.
+  const transforms = [];
 
-  await document.transform(transform);
+  if (compressionType === "meshopt") {
+    // meshopt() welds, reorders and quantizes internally, lines included.
+    transforms.push(meshopt({ encoder: MeshoptEncoder, level: "high" }));
+  } else {
+    transforms.push(
+      dedup(),
+      weld(),
+      // keepLeaves/keepExtras: never trim the LDraw part hierarchy or the
+      // per-part metadata; the named group nodes are what makes the .glb
+      // usable as a LEGO model rather than a bag of pieces.
+      prune({ keepLeaves: true, keepExtras: true }),
+      draco({
+        method: "edgebreaker",
+        quantizePosition: 14,
+        quantizeNormal: 10,
+      }),
+    );
+  }
+
+  await document.transform(...transforms);
 }
 
 // ==================== CLI argument parsing ====================
@@ -586,6 +882,10 @@ function parseCLI(argv = process.argv) {
         type: "string",
         multiple: true,
         default: [],
+      },
+      descriptions: {
+        type: "string",
+        // No default - auto-discovered, see findPartDescriptionsFile()
       },
     },
     allowPositionals: true,
@@ -627,6 +927,7 @@ function parseCLI(argv = process.argv) {
     compress: values.compress,
     ldraw: values.ldraw || null, // Convert empty string to null
     colorMappings: parseColorMappingSpecs(values["map-color"]),
+    descriptions: values.descriptions || null, // Convert empty string to null
   };
 }
 
@@ -707,7 +1008,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { input, output, compress, ldraw, colorMappings } = config;
+  const { input, output, compress, ldraw, colorMappings, descriptions } = config;
 
   // Elapsed time measurement
   const startTime = Date.now();
@@ -716,7 +1017,16 @@ async function main() {
 
   // -- Load and prepare the LDraw model (ONLY for packed .mpd files) --
   const mpdContents = await readTextFile(input);
-  let ldrawGroup = await ldrawMPDtoGroup(mpdContents, ldraw, colorMappings);
+  const partDescriptions = await loadPartDescriptions(
+    descriptions,
+    descriptions !== null,
+  );
+  let ldrawGroup = await ldrawMPDtoGroup(
+    mpdContents,
+    ldraw,
+    colorMappings,
+    partDescriptions,
+  );
   ldrawGroup = optimizeLDrawGroup(ldrawGroup);
 
   // -- Convert to GLB --
