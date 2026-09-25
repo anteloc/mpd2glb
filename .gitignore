@@ -3,3 +3,5 @@ node_modules/
 dist/
 package-lock.json
 mpd2glb.mjs
+*.glb
+
