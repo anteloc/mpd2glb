@@ -26,30 +26,58 @@ The final `.glb` model will have the real-world dimensions of the original model
 
 ### Prerequisites
 
-I've built and tested this tool with the following (other versions could also work):
+Install one of the following runtimes before building or using a GitHub Release
+asset. Node.js is the primary supported runtime; Bun is a tested alternative.
 
-- [Node v24.11](https://nodejs.org/en/download)
-- [npm v11.6.1](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm)
-- [Bun v1.3.10 (optional)](https://bun.com/)
+- [Node.js v24.11.0 or later](https://nodejs.org/en/download), with npm
+- [Bun v1.3.10 or later (alternative)](https://bun.com/)
 
-### Building from source (no other way for now!)
+Check the runtime you intend to use before continuing:
+
+```bash
+node --version # must be v24.11.0 or newer
+# or
+bun --version  # must be v1.3.10 or newer
+```
+
+### Building from source
 
 ```bash
 git clone https://github.com/anteloc/mpd2glb.git
 cd mpd2glb
 npm install # install required node modules
-npm run build # outputs: mpd2glb.mjs executable for bun
+npm run build # outputs the mpd2glb.mjs CLI bundle
 ```
 
 ### Verify it works
 
 ```bash
-npm main.mjs --help
+node main.mjs --help
 # or
 bun main.mjs --help
-# or (bun only!)
+# or (after npm run build)
+node mpd2glb.mjs --help
+# or
 bun mpd2glb.mjs --help
 ```
+
+### Using a GitHub Release
+
+Each GitHub Release includes the prebuilt CLI as `.zip` and `.tar.gz` archives.
+After extracting one, install its production dependencies with the runtime you
+prefer, then run the bundled CLI:
+
+```bash
+cd mpd2glb-<version>
+npm ci --omit=dev # Node.js
+# or: bun install --production
+
+node mpd2glb.mjs --help
+# or: bun mpd2glb.mjs --help
+```
+
+See [`.github/RELEASE.md`](.github/RELEASE.md) for the maintainer release
+process.
 
 ## Usage
 
@@ -148,4 +176,3 @@ repeated parts costs a single lookup per distinct part.
 - The resulting `.glb` files can be imported and edited with other tools
 - World-size models (centimetres): on some editors, they will look very small or even hard to find 
 - Editable parts: individual parts can be handled independently.
-

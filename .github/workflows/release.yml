@@ -1,0 +1,113 @@
+name: Release
+
+# A release is deliberately created only by pushing a version tag. This makes
+# the tag, GitHub Release, and package.json version describe the same build.
+on:
+  push:
+    tags:
+      - "v*"
+
+# contents: write lets the built-in GITHUB_TOKEN create a GitHub Release and
+# upload its assets. Repository Actions settings must allow workflow write
+# permissions; see .github/RELEASE.md.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release assets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Keep this explicit instead of relying on the runner's default Node.
+      # If the minimum runtime changes, update package.json, README.md, and
+      # .github/RELEASE.md at the same time.
+      - name: Set up Node.js 24.11.0
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.11.0
+
+      # Bun is a supported way to run the published bundle, so smoke-test it
+      # during every release as well as the primary Node.js runtime.
+      - name: Set up Bun 1.3.10
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Install locked build dependencies
+        run: npm ci
+
+      - name: Check that the tag and package version match
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # Tags must be v-prefixed semantic versions, for example v0.3.1.
+          # package.json is the one manual version bump for every release.
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "Release tag must look like vX.Y.Z (optionally with a prerelease suffix): $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          package_version="$(node --input-type=module --eval \"import pkg from './package.json' with { type: 'json' }; console.log(pkg.version)\")"
+          if [[ "${RELEASE_TAG#v}" != "$package_version" ]]; then
+            echo "Tag $RELEASE_TAG does not match package.json version $package_version" >&2
+            exit 1
+          fi
+
+      - name: Build and smoke-test the CLI
+        run: |
+          npm run build
+          node mpd2glb.mjs --help
+          bun mpd2glb.mjs --help
+          # A packed local model avoids network access while proving both
+          # runtimes can complete an actual conversion, not only parse flags.
+          node mpd2glb.mjs --compress none --output /tmp/mpd2glb-node-smoke.glb models/f1-car-packed.mpd
+          bun mpd2glb.mjs --compress none --output /tmp/mpd2glb-bun-smoke.glb models/f1-car-packed.mpd
+          test -s /tmp/mpd2glb-node-smoke.glb
+          test -s /tmp/mpd2glb-bun-smoke.glb
+
+      - name: Package cross-platform release archives
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # Do not include node_modules: native dependencies vary by OS and
+          # architecture. The archive includes package-lock.json so recipients
+          # can reproduce the tested production dependency tree with npm ci.
+          version="${RELEASE_TAG#v}"
+          release_dir="dist/release/mpd2glb-$version"
+          asset_dir="dist/assets"
+
+          mkdir -p "$release_dir" "$asset_dir"
+          # Include main.mjs too, so an archive recipient can inspect or rebuild
+          # the exact source that produced the prebuilt mpd2glb.mjs command.
+          cp main.mjs mpd2glb.mjs part-descriptions-full.tsv package.json package-lock.json README.md LICENSE "$release_dir"
+
+          tar -C dist/release -czf "$asset_dir/mpd2glb-$version.tar.gz" "mpd2glb-$version"
+          (
+            cd dist/release
+            zip -qr "../assets/mpd2glb-$version.zip" "mpd2glb-$version"
+          )
+          (
+            cd "$asset_dir"
+            sha256sum "mpd2glb-$version.tar.gz" "mpd2glb-$version.zip" > SHA256SUMS.txt
+          )
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # Re-running a failed workflow replaces only this tag's assets;
+          # it never creates a second release or changes another tag.
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/assets/* \
+              --title "mpd2glb $RELEASE_TAG" \
+              --generate-notes
+          fi
