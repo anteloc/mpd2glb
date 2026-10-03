@@ -52,9 +52,10 @@ personal access token or GitHub secret is needed.
   in a new commit, move or recreate the tag deliberately, then push it again.
 - It does **not** publish to npm. GitHub Release assets are the distribution
   channel.
-- Archives intentionally omit `node_modules`, because native dependencies are
-  platform-specific. They include `package-lock.json`; release users run
-  `npm ci --omit=dev` (or `bun install --production`) after extracting them.
+- Archives omit `node_modules`: `build.mjs` bundles every runtime dependency,
+  WASM included, into `mpd2glb.mjs`, so release users run it straight after
+  extracting. The workflow smoke-tests the bundle from an empty directory to
+  catch a dependency that slips out of the bundle.
 - Re-running the workflow for an existing tag replaces that release's assets
   only. It does not create duplicate releases.
 

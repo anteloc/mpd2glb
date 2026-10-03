@@ -64,17 +64,18 @@ bun mpd2glb.mjs --help
 ### Using a GitHub Release
 
 Each GitHub Release includes the prebuilt CLI as `.zip` and `.tar.gz` archives.
-After extracting one, install its production dependencies with the runtime you
-prefer, then run the bundled CLI:
+`mpd2glb.mjs` is self-contained, so it runs as soon as it's extracted, with no
+`npm install`:
 
 ```bash
 cd mpd2glb-<version>
-npm ci --omit=dev # Node.js
-# or: bun install --production
-
 node mpd2glb.mjs --help
 # or: bun mpd2glb.mjs --help
 ```
+
+The optional `part-descriptions-full.tsv` is picked up when it sits next to
+`mpd2glb.mjs` (or in the current directory), so keep the two together when
+copying the CLI into another project.
 
 See [`.github/RELEASE.md`](.github/RELEASE.md) for the maintainer release
 process.

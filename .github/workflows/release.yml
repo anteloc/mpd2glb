@@ -62,30 +62,37 @@ jobs:
       - name: Build and smoke-test the CLI
         run: |
           npm run build
+          # Run the bundle away from the repository, as release users do. With
+          # no node_modules to fall back on, any unbundled dependency fails here.
+          smoke_dir="$(mktemp -d)"
+          cp mpd2glb.mjs models/f1-car-packed.mpd "$smoke_dir"
+          cd "$smoke_dir"
           node mpd2glb.mjs --help
           bun mpd2glb.mjs --help
           # A packed local model avoids network access while proving both
-          # runtimes can complete an actual conversion, not only parse flags.
-          node mpd2glb.mjs --compress none --output /tmp/mpd2glb-node-smoke.glb models/f1-car-packed.mpd
-          bun mpd2glb.mjs --compress none --output /tmp/mpd2glb-bun-smoke.glb models/f1-car-packed.mpd
-          test -s /tmp/mpd2glb-node-smoke.glb
-          test -s /tmp/mpd2glb-bun-smoke.glb
+          # runtimes can complete an actual conversion with every compressor.
+          for runtime in node bun; do
+            for compress in none meshopt draco; do
+              "$runtime" mpd2glb.mjs --compress "$compress" --output "$runtime-$compress.glb" f1-car-packed.mpd
+              test -s "$runtime-$compress.glb"
+            done
+          done
 
       - name: Package cross-platform release archives
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          # Do not include node_modules: native dependencies vary by OS and
-          # architecture. The archive includes package-lock.json so recipients
-          # can reproduce the tested production dependency tree with npm ci.
+          # mpd2glb.mjs bundles every runtime dependency, so the archive runs
+          # as extracted, with no node_modules and no install step.
           version="${RELEASE_TAG#v}"
           release_dir="dist/release/mpd2glb-$version"
           asset_dir="dist/assets"
 
           mkdir -p "$release_dir" "$asset_dir"
-          # Include main.mjs too, so an archive recipient can inspect or rebuild
+          # Include the build inputs too (main.mjs, build.mjs, package.json and
+          # package-lock.json), so an archive recipient can inspect or rebuild
           # the exact source that produced the prebuilt mpd2glb.mjs command.
-          cp main.mjs mpd2glb.mjs part-descriptions-full.tsv package.json package-lock.json README.md LICENSE "$release_dir"
+          cp main.mjs build.mjs mpd2glb.mjs part-descriptions-full.tsv package.json package-lock.json README.md LICENSE "$release_dir"
 
           tar -C dist/release -czf "$asset_dir/mpd2glb-$version.tar.gz" "mpd2glb-$version"
           (
