@@ -177,3 +177,23 @@ repeated parts costs a single lookup per distinct part.
 - The resulting `.glb` files can be imported and edited with other tools
 - World-size models (centimetres): on some editors, they will look very small or even hard to find 
 - Editable parts: individual parts can be handled independently.
+
+## Acknowledgements
+
+I'd like to thank the following:
+
+- [The LDraw Community](https://www.ldraw.org/)
+- [LDView](https://tcobbs.github.io/ldview/)'s Travis Cobbs (@tcobbs), and contributors.
+- [LeoCAD](https://github.com/leozide/leocad)'s Leonardo Zide (@leozide), and contributors.
+
+... and thanks to all of the many other LDraw creators!
+
+**NOTE:** For this work, I've used many LDraw models, libraries, tools, docs... from many sources.
+
+There is a lot **amazing people** that generously contributed to this, even for **decades**, by **generously donating their finest work** to the public domain and open source community. 
+
+If you think you should be included on this section, please **drop me an email!**
+
+## Trademarks
+
+**LEGO(R)** is a trademark of the **LEGO Group** of companies which does not sponsor, authorize or endorse this software.
